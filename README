@@ -46,6 +46,34 @@ While running:
 	r	redraw (will recreate all entities)
 	p	toggle pause
 
+TODO-in-fish integration
+------------------------
+
+Asciiquarium can now render TODO text directly inside some fish bodies.
+It is designed to work without extra setup with common terminal todo tools
+and file formats.
+
+At startup, Asciiquarium scans common task locations and formats, including:
+
+- `~/.local/share/meowdo/todos.txt` (Meowdo format)
+- `MDT_DIR` / `MDT_INBOX` markdown files (mdt)
+- `TODO.md`, `todo.txt`, `tasks.md`, and similar files in the current
+  directory and home directory
+- JSON task files (`tasks.json`, `todo.json`, `todos.json`) in common app
+  directories such as `~/.config/dooit`, `~/.local/share/dooit`,
+  and `~/.local/share/meowdo`
+- YAML task files (`todo.yaml`, `todo.yml`) in common dooit-style paths
+
+Supported task patterns:
+
+- Markdown checkboxes: `- [ ] task`
+- todo.txt entries (completed lines prefixed with `x YYYY-MM-DD` are ignored)
+- Meowdo pipe-delimited rows (`priority|done|tag|description|...`)
+- Generic JSON task objects (uses fields like `task`, `title`, `text`,
+  `description`, with `done/completed` filtering when present)
+- Basic YAML task objects (e.g., `- description: ...` with
+  `done/completed: false`)
+
 Contributors
 ------------
 

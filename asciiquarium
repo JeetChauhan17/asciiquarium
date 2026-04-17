@@ -49,6 +49,8 @@ use Term::Animation::Entity;
 use Data::Dumper;
 use Curses;
 use Getopt::Std;
+use JSON::PP;
+use File::Spec;
 use strict;
 use warnings;
 
@@ -65,6 +67,8 @@ if ($opt_c) {			# 'classic' mode
 }
 
 my @random_objects = init_random_objects();
+my @todo_items = load_todo_messages();
+my $todo_index = 0;
 
 # the Z depth at which certain items occur
 my %depth = (
@@ -294,6 +298,10 @@ sub add_all_fish {
 
 sub add_fish {
 	my @parm = @_;
+	if (@todo_items && int(rand(5)) == 0) {
+		add_todo_fish(@parm);
+		return;
+	}
 
 	if ($new_fish) {
 		if (int(rand(12)) > 8) {
@@ -701,6 +709,94 @@ sub add_fish_entity {
 		$fish_object->{'X'} = 1 - $fish_object->{'WIDTH'};
 	}
 	$anim->add_entity($fish_object);
+}
+
+sub add_todo_fish {
+	my ($old_fish, $anim) = @_;
+	return add_old_fish($old_fish, $anim) unless(@todo_items);
+
+	my $todo = $todo_items[$todo_index++ % scalar(@todo_items)];
+	$todo = sanitize_todo_text($todo);
+
+	my $max_todo_width = 24;
+	$todo = substr($todo, 0, $max_todo_width);
+
+	my @todo_fish_image = (
+q{
+   __
+<(__TODO__)><
+   --
+},
+q{
+   __
+><(__TODO__)>
+   --
+},
+	);
+
+	my $padded = sprintf("%-${max_todo_width}s", $todo);
+	$todo_fish_image[0] =~ s/__TODO__/$padded/g;
+	$todo_fish_image[1] =~ s/__TODO__/$padded/g;
+	my @todo_fish_mask = (
+		build_todo_mask($todo_fish_image[0]),
+		build_todo_mask($todo_fish_image[1]),
+	);
+
+	my $dir = int(rand(2));
+	my $speed = (rand(1.5) + 0.75) * ($dir ? -1 : 1);
+	my $depth = int(rand($depth{'fish_end'} - $depth{'fish_start'})) + $depth{'fish_start'};
+
+	my $fish_object = Term::Animation::Entity->new(
+		type		=> 'fish',
+		shape		=> $todo_fish_image[$dir],
+		auto_trans	=> 1,
+		color		=> $todo_fish_mask[$dir],
+		position	=> [ 0, 0, $depth ],
+		callback	=> \&fish_callback,
+		callback_args	=> [ $speed, 0, 0 ],
+		die_offscreen	=> 1,
+		death_cb	=> \&add_fish,
+		physical	=> 1,
+		coll_handler	=> \&fish_collision,
+	);
+
+	my $max_height = 9;
+	my $min_height = $anim->height() - $fish_object->{'HEIGHT'};
+	$fish_object->{'Y'} = int(rand($min_height - $max_height)) + $max_height;
+	if($dir) {
+		$fish_object->{'X'} = $anim->width()-2;
+	} else {
+		$fish_object->{'X'} = 1 - $fish_object->{'WIDTH'};
+	}
+	$anim->add_entity($fish_object);
+}
+
+sub build_todo_mask {
+	my ($shape) = @_;
+	my @lines = split(/\n/, $shape);
+	my @mask;
+	foreach my $line (@lines) {
+		my $m = $line;
+		$m =~ s/[A-Za-z0-9]/y/g;
+		$m =~ s/[<>]/c/g;
+		$m =~ s/[()]/b/g;
+		$m =~ s/[_-]/g/g;
+		$m =~ s/\s/ /g;
+		push(@mask, $m);
+	}
+	return join("\n", @mask);
+}
+
+sub sanitize_todo_text {
+	my ($todo) = @_;
+	$todo //= '';
+	$todo =~ s/\r//g;
+	$todo =~ s/\t/ /g;
+	$todo =~ s/\s+/ /g;
+	$todo =~ s/^\s+|\s+$//g;
+	$todo =~ s/[<>\(\)]//g;
+	$todo =~ s/[^\x20-\x7E]/?/g;
+	return $todo || 'TODO';
 }
 
 sub fish_callback {
@@ -1410,6 +1506,203 @@ q{
 		die_offscreen	=> 1,
 		default_color	=> 'YELLOW',
 	);
+}
+
+sub load_todo_messages {
+	my @files = discover_todo_files();
+	my @todos;
+	my %seen;
+
+	foreach my $file (@files) {
+		next unless(-f $file && -r $file);
+		my @items = parse_todo_file($file);
+		foreach my $item (@items) {
+			my $clean = sanitize_todo_text($item);
+			next unless(length($clean));
+			next if($seen{$clean}++);
+			push(@todos, $clean);
+		}
+	}
+	return @todos;
+}
+
+sub discover_todo_files {
+	my %seen;
+	my @files;
+	my $home = $ENV{'HOME'} || '';
+	my @candidate_names = qw(
+		TODO.md todo.md TODO.MD
+		TODO.txt todo.txt tasks.txt
+		tasks.md inbox.md
+		todo.yaml todo.yml
+		tasks.json todo.json todos.json
+		todos.txt
+	);
+
+	my @roots = ('.');
+	push(@roots, $home) if($home);
+	push(@roots, File::Spec->catdir($home, '.todo')) if($home);
+	push(@roots, File::Spec->catdir($home, '.config', 'dooit')) if($home);
+	push(@roots, File::Spec->catdir($home, '.local', 'share', 'dooit')) if($home);
+	push(@roots, File::Spec->catdir($home, '.local', 'share', 'meowdo')) if($home);
+
+	if($ENV{'MDT_DIR'}) {
+		push(@roots, $ENV{'MDT_DIR'});
+	}
+
+	if($ENV{'MDT_INBOX'}) {
+		push(@files, $ENV{'MDT_INBOX'});
+	}
+
+	foreach my $root (@roots) {
+		next unless(defined($root) && -d $root);
+		foreach my $name (@candidate_names) {
+			my $path = File::Spec->catfile($root, $name);
+			push(@files, $path) if(-f $path);
+		}
+	}
+
+	push(@files, File::Spec->catfile($home, '.local', 'share', 'meowdo', 'tasks.json')) if($home);
+	push(@files, File::Spec->catfile($home, '.local', 'share', 'meowdo', 'todos.json')) if($home);
+	push(@files, File::Spec->catfile($home, '.local', 'share', 'meowdo', 'todos.txt')) if($home);
+	push(@files, File::Spec->catfile($home, '.config', 'dooit', 'tasks.json')) if($home);
+	push(@files, File::Spec->catfile($home, '.config', 'dooit', 'todo.json')) if($home);
+	push(@files, File::Spec->catfile($home, '.config', 'dooit', 'todo.yaml')) if($home);
+	push(@files, File::Spec->catfile($home, '.local', 'share', 'dooit', 'todo.yaml')) if($home);
+
+	my @uniq = grep { !$seen{$_}++ } @files;
+	return @uniq;
+}
+
+sub parse_todo_file {
+	my ($file) = @_;
+	open(my $fh, '<', $file) or return ();
+	local $/;
+	my $content = <$fh>;
+	close($fh);
+
+	return parse_json_todos($content) if($file =~ /\.json$/i);
+	return parse_yaml_todos($content) if($file =~ /\.(yml|yaml)$/i);
+	return parse_meowdo_todos($content) if($file =~ /meowdo/i);
+	return parse_markdown_todos($content) if($file =~ /\.(md|markdown)$/i);
+	return parse_todotxt($content) if($file =~ /todo\.txt$/i);
+
+	my @md = parse_markdown_todos($content);
+	return @md if(@md);
+	my @yaml = parse_yaml_todos($content);
+	return @yaml if(@yaml);
+	return parse_todotxt($content);
+}
+
+sub parse_markdown_todos {
+	my ($content) = @_;
+	my @items;
+	foreach my $line (split(/\n/, $content)) {
+		next if($line =~ /^\s*#/);
+		if($line =~ /^\s*[-*+]\s+\[\s\]\s+(.+)$/) {
+			push(@items, $1);
+		}
+	}
+	return @items;
+}
+
+sub parse_todotxt {
+	my ($content) = @_;
+	my @items;
+	foreach my $line (split(/\n/, $content)) {
+		$line =~ s/^\s+|\s+$//g;
+		next unless(length($line));
+		next if($line =~ /^x\s+\d{4}-\d{2}-\d{2}/i);
+		$line =~ s/^\([A-Z]\)\s+//;
+		push(@items, $line);
+	}
+	return @items;
+}
+
+sub parse_meowdo_todos {
+	my ($content) = @_;
+	my @items;
+	foreach my $line (split(/\n/, $content)) {
+		next unless($line =~ /\|/);
+		my @parts = split(/\|/, $line);
+		next unless(@parts >= 4);
+		my $done = lc($parts[1] // '');
+		next if($done eq 'x' || $done eq 'done' || $done eq 'true');
+		push(@items, $parts[3]);
+	}
+	return @items;
+}
+
+sub parse_json_todos {
+	my ($content) = @_;
+	my $decoded = eval { JSON::PP::decode_json($content) };
+	return () if($@ || !defined($decoded));
+	my @items;
+	collect_json_todos($decoded, \@items);
+	return @items;
+}
+
+sub parse_yaml_todos {
+	my ($content) = @_;
+	my @items;
+	my @lines = split(/\n/, $content);
+	my $pending = 0;
+	my $current;
+
+	foreach my $line (@lines) {
+		if($line =~ /^\s*-\s+(?:description|task|title|text)\s*:\s*(.+)\s*$/i) {
+			$current = $1;
+			$current =~ s/^['"]|['"]$//g;
+			$pending = 1;
+			next;
+		}
+		if($line =~ /^\s*(?:done|completed)\s*:\s*(.+)\s*$/i) {
+			my $state = lc($1);
+			my $done = ($state =~ /^(true|yes|1)$/) ? 1 : 0;
+			push(@items, $current) if($pending && !$done && defined($current));
+			$pending = 0;
+			$current = undef;
+			next;
+		}
+		if($pending && $line =~ /^\s*-\s*(.+)$/) {
+			push(@items, $current) if(defined($current));
+			$current = undef;
+			$pending = 0;
+		}
+	}
+
+	push(@items, $current) if($pending && defined($current));
+	return @items;
+}
+
+sub collect_json_todos {
+	my ($value, $items, $parent_completed) = @_;
+	if(ref($value) eq 'ARRAY') {
+		foreach my $item (@{$value}) {
+			collect_json_todos($item, $items, $parent_completed);
+		}
+		return;
+	}
+	if(ref($value) eq 'HASH') {
+		my $completed = $parent_completed;
+		if(exists($value->{'done'})) {
+			$completed = $value->{'done'} ? 1 : 0;
+		}
+		if(exists($value->{'completed'})) {
+			$completed = $value->{'completed'} ? 1 : 0;
+		}
+		if(!$completed) {
+			foreach my $key (qw(task title text content description name)) {
+				if(defined($value->{$key}) && !ref($value->{$key})) {
+					push(@{$items}, $value->{$key});
+					last;
+				}
+			}
+		}
+		foreach my $k (keys(%{$value})) {
+			collect_json_todos($value->{$k}, $items, $completed);
+		}
+	}
 }
 
 sub init_random_objects {
